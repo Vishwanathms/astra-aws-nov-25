@@ -1,0 +1,6 @@
+clean*
+ec2_cleanup_*.log
+List*
+delete*
+network*
+logs/
