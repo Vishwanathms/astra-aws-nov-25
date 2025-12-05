@@ -1,0 +1,102 @@
+from flask import Flask, request, render_template_string
+import boto3
+import psycopg2
+import json
+
+app = Flask(__name__)
+
+S3_BUCKET = "your-bucket-name"
+API_URL = "https://your-api-id.execute-api.your-region.amazonaws.com/test/hello"
+SECRET_NAME = "your-db-secret-name"
+REGION = "your-region"
+
+# STATIC DB CONFIG
+DB_HOST = "your-rds-endpoint"
+DB_PORT = "5432"
+DB_NAME = "postgres"     # or your real DB name
+
+
+secrets = boto3.client("secretsmanager", region_name=REGION)
+s3 = boto3.client("s3")
+
+# Function to get DB creds from Secrets Manager
+def get_db_creds():
+    secret_value = secrets.get_secret_value(SecretId=SECRET_NAME)
+    secret_dict = json.loads(secret_value["SecretString"])
+    return secret_dict
+
+# Initialize DB connection
+def connect_db():
+    db = get_db_creds()
+    conn = psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=db["username"],
+        password=db["password"]
+    )
+    return conn
+
+# HTML Template
+HTML = """
+<h2>AWS Demo Application</h2>
+
+<h3>1. Upload File to S3</h3>
+<form method="POST" enctype="multipart/form-data" action="/upload">
+    <input type="file" name="file">
+    <button type="submit">Upload</button>
+</form>
+
+<h3>2. Trigger API Gateway + Lambda</h3>
+<form action="/call-api" method="POST">
+    <button type="submit">Call API</button>
+</form>
+
+<p><b>API Response:</b> {{ api_response }}</p>
+
+<h3>3. Hit Counts (Logged to PostgreSQL)</h3>
+<p>Total Button Clicks: <b>{{ count }}</b></p>
+"""
+
+@app.route("/", methods=["GET"])
+def index():
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM apihits;")
+    hits = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return render_template_string(HTML, api_response="", count=hits)
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    file = request.files["file"]
+    file.stream.seek(0)
+    s3.upload_fileobj(file, S3_BUCKET, file.filename)
+    return "<h3>File uploaded to S3 successfully!</h3><a href='/'>Go back</a>"
+
+@app.route("/call-api", methods=["POST"])
+def call_api():
+    import requests
+    response = requests.get(API_URL).text
+
+    # Log hit count into RDS
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO apihits(action) VALUES ('button_click');")
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return render_template_string(HTML, api_response=response, count=get_hit_count())
+
+def get_hit_count():
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM apihits;")
+    hits = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return hits
+
+app.run(host="0.0.0.0", port=80)
