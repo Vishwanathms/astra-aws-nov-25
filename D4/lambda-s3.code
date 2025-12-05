@@ -1,0 +1,75 @@
+import boto3
+import os
+
+s3 = boto3.client("s3")
+sns = boto3.client("sns")
+
+SNS_TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]
+
+def lambda_handler(event, context):
+    print("Received event:", event)
+
+    record = event["Records"][0]
+    bucket = record["s3"]["bucket"]["name"]
+    key = record["s3"]["object"]["key"]
+
+    # Ignore folder-created events
+    if key.endswith("/"):
+        print("Skipping folder event:", key)
+        return
+
+    # Detect extension
+    ext = key.rsplit(".", 1)[-1].lower() if "." in key else ""
+
+    folder_map = {
+        "doc": "doc/",
+        "docx": "doc/",
+        "jpeg": "jpeg/",
+        "jpg": "jpeg/",
+        "pdf": "pdf/",
+        "xls": "excel/",
+        "xlsx": "excel/",
+    }
+
+    target_folder = folder_map.get(ext, "others/")
+    new_key = f"{target_folder}{key}"
+
+    # 🚨 STOP LOOP: If file is already inside target folder, DO NOTHING
+    if key.startswith(target_folder):
+        print(f"File '{key}' is already inside '{target_folder}'. Skipping to avoid loop.")
+        return {
+            "statusCode": 200,
+            "body": f"Skipped loop for {key}"
+        }
+
+    # Publish SNS
+    message = (
+        f"File '{key}' uploaded. Extension '.{ext}'. "
+        f"Moving to '{target_folder}' → '{new_key}'"
+    )
+    sns.publish(
+        TopicArn=SNS_TOPIC_ARN,
+        Subject="S3 File Type Processed",
+        Message=message
+    )
+
+    # Move file
+    s3.copy_object(
+        Bucket=bucket,
+        CopySource={"Bucket": bucket, "Key": key},
+        Key=new_key
+    )
+
+    s3.delete_object(Bucket=bucket, Key=key)
+
+    print("Moved:", key, "→", new_key)
+
+    return {
+        "statusCode": 200,
+        "body": {
+            "old_key": key,
+            "new_key": new_key,
+            "extension": ext,
+            "target_folder": target_folder
+        }
+    }
